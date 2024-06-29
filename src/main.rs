@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use alloy_sol_types::sol;
+use alloy_sol_types::{sol, SolEventInterface};
 use futures::Future;
+use reth::blockchain_tree::chain;
 use reth_exex::{ExExContext, ExExNotification};
 use reth_node_api::FullNodeComponents;
-use reth_primitives::{address, revm_primitives::FixedBytes, ruint::Uint, Address};
+use reth_primitives::{address, revm_primitives::FixedBytes, ruint::Uint, Address, SealedBlockWithSenders, TransactionSigned};
+use reth_provider::Chain;
 use reth_tracing::tracing::info;
 use rusqlite::Connection;
 
@@ -13,10 +15,7 @@ const DB_PATH: &'static str = "bridge.db";
 
 // ABI
 sol!(RootERC20Bridge, "root_erc20_bridge_abi.json");
-use RootERC20Bridge::{
-    ChildChainERC20Deposit, IMXDeposit, NativeEthDeposit, RootChainERC20Withdraw,
-    RootChainETHWithdraw, WETHDeposit,
-};
+use RootERC20Bridge::RootERC20BridgeEvents;
 
 // L1 contract addr
 const IMMUTABLE_BRIDGE: Address = address!("Ba5E35E26Ae59c7aea6F029B68c6460De2d13eB6");
@@ -42,7 +41,7 @@ impl Database {
         let mut connection = self.connection();
         let tx = connection.transaction()?;
         match event.source {
-            EventKind::Root => {
+            EventSource::Root => {
                 tx.execute(
                         r#"
                             INSERT INTO deposits (block_number, tx_hash, root_token, child_token, "from", "to", amount)
@@ -59,7 +58,7 @@ impl Database {
                     ),
                 )?;
             }
-            EventKind::Child => {
+            EventSource::Child => {
                 tx.execute(
                     r#"
                         INSERT INTO withdrawals (block_number, tx_hash, root_token, child_token, "from", "to", amount)
@@ -111,12 +110,12 @@ impl Database {
     }
 }
 
-enum EventKind {
+enum EventSource {
     Root,
     Child,
 }
 struct BridgeEvent {
-    source: EventKind,
+    source: EventSource,
     block_number: u64,
     tx_hash: FixedBytes<32>,
     root_token: Address,
@@ -161,6 +160,42 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
     }
 }
 
+fn decode_chain_into_events(
+    chain: &Chain,
+) -> Vec<(
+    &SealedBlockWithSenders,
+    &TransactionSigned,
+    RootERC20BridgeEvents,
+)> {
+    chain
+    // Step 1: Get all blocks and receipts from the chain
+    .blocks_and_receipts()
+    // Step 2: For each (block, receipts) pair, flatten the receipts and pair each transaction with its corresponding receipt
+    .flat_map(|(block, receipts)| {
+        block
+            .body
+            .iter()                  // Iterate over all transactions in the block
+            .zip(receipts.iter().flatten())  // Pair each transaction with its corresponding receipt
+            .map(move |(tx, receipt)| (block, tx, receipt))  // Create a tuple (block, tx, receipt) for each pair
+    })
+    // [(block1, tx1, receipt1), (block1, tx2, receipt2), ..., (blockN, txM, receiptM)]
+    // Step 3: Filter transactions that are directed to the rollup contract
+    .filter(|(_, tx, _)| tx.to() == Some(IMMUTABLE_BRIDGE))
+    // [(block1, tx1, receipt1), ..., (blockX, txY, receiptY)] (only transactions to IMMUTABLE_BRIDGE)
+    // Step 4: For each filtered tuple, iterate over the logs in the receipt and create a tuple (block, tx, log) for each log
+    .flat_map(|(block, tx, receipt)| receipt.logs.iter().map(move |log| (block, tx, log)))
+    // [(block1, tx1, log1), (block1, tx1, log2), ..., (blockX, txY, logZ)]
+    // Step 5: Decode each log into a RootERC20BridgeEvent and filter out logs that do not decode
+    .filter_map(|(block, tx, log)| {
+        RootERC20BridgeEvents::decode_raw_log(log.topics(), &log.data.data, true)
+            .ok()
+            .map(|event| (block, tx, event))  // Create a tuple (block, tx, event) for successfully decoded logs
+    })
+    // [(block1, tx1, event1), (block1, tx1, event2), ..., (blockX, txY, eventN)]
+    // Step 6: Collect all the tuples into a vector
+    .collect()
+    // Final Output: Vec of tuples (block, transaction, decoded event)
+}
 fn main() -> eyre::Result<()> {
     Ok(())
 }
