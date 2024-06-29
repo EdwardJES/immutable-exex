@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use alloy_sol_types::sol;
+use futures::Future;
 use reth_exex::{ExExContext, ExExNotification};
 use reth_node_api::FullNodeComponents;
 use reth_primitives::{address, revm_primitives::FixedBytes, ruint::Uint, Address};
+use reth_tracing::tracing::info;
 use rusqlite::Connection;
 
 // DB
@@ -36,7 +38,7 @@ impl Database {
         self.connection.lock().expect("failed to aquire db lock")
     }
 
-    fn insert_event(&mut self, event: BridgeEvent) -> eyre::Result<()> {
+    fn insert_event(&mut self, event: BridgeEvent) -> rusqlite::Result<()> {
         let mut connection = self.connection();
         let tx = connection.transaction()?;
         match event.source {
@@ -109,12 +111,12 @@ impl Database {
     }
 }
 
-enum SourceChain {
+enum EventKind {
     Root,
     Child,
 }
 struct BridgeEvent {
-    source: SourceChain,
+    source: EventKind,
     block_number: u64,
     tx_hash: FixedBytes<32>,
     root_token: Address,
@@ -130,15 +132,20 @@ pub struct ImmutableBridgeReader<Node: FullNodeComponents> {
 }
 
 impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
-    fn new(ctx: ExExContext<Node>, db: Database) -> eyre::Result<Self> {
-        Ok(Self { ctx, db })
+    fn init(
+        ctx: ExExContext<Node>,
+        connection: Connection,
+    ) -> eyre::Result<impl Future<Output = eyre::Result<()>>> {
+        let db = Database::new(connection)?;
+        Ok(Self { ctx, db }.run())
     }
 
-    async fn run(&mut self) -> eyre::Result<()> {
+    async fn run(mut self) -> eyre::Result<()> {
         while let Some(notification) = self.ctx.notifications.recv().await {
             match &notification {
                 ExExNotification::ChainCommitted { new } => {
                     // do something
+                    info!("Chain committed");
                 }
                 ExExNotification::ChainReorged { old, new } => {
                     // do something
@@ -160,6 +167,8 @@ fn main() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use alloy_sol_types::{abi::Token, SolEvent};
+    use reth::revm::db::BundleState;
+    use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_exex_test_utils::{test_exex_context, PollOnce};
     use reth_primitives::{
         Address, Block, Header, Log, Receipt, Transaction, TransactionSigned, TxEip1559, TxKind,
@@ -175,13 +184,13 @@ mod tests {
         to: Address,
         event: E,
     ) -> eyre::Result<(TransactionSigned, Receipt)> {
-        // Construct dynamic tx
+        // Construct dynamic tx, specificy tx kind call (transfer or contract call)
         let tx: Transaction = Transaction::Eip1559(TxEip1559 {
             to: TxKind::Call(to),
             ..Default::default()
         });
 
-        // Construct log
+        // Construct log, injecting event data
         let log = Log::new(
             to,
             event
@@ -191,10 +200,10 @@ mod tests {
                 .collect(),
             event.encode_data().into(),
         )
-        .ok_or_else(|| eyre::eyre!("failed to encode event"))?;
+        .ok_or_else(|| eyre::eyre!("failed to construct topics from event"))?;
         #[allow(clippy::needless_update)] // side-effect of optimism fields
 
-        // Construct receipt
+        // Construct receipt for tx containing log
         let receipt = Receipt {
             tx_type: TxType::Eip1559,
             success: true,
@@ -210,21 +219,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_exec() -> eyre::Result<()> {
+        // Create test exex
         let (ctx, handle) = test_exex_context().await?;
 
-        // Create a temporary database file, so we can access it later for assertions
+        // Create tmp file for db
         let db_file = tempfile::NamedTempFile::new()?;
 
         // Initialize the ExEx
-        let mut exex = pin!(super::init(ctx, Connection::open(&db_file)?).await?);
+        let mut exex = pin!(ImmutableBridgeReader::init(
+            ctx,
+            Connection::open(&db_file)?
+        )?);
 
-        // Generate random "from" and "to" addresses for deposit and withdrawal events
+        // Generate random addresses for event
         let from_address = Address::random();
         let to_address = Address::random();
         let root_token = Address::random();
         let child_token = Address::random();
 
-        // Construct deposit event, transaction and receipt
+        // Construct deposit event
         let deposit_event = RootERC20Bridge::NativeEthDeposit {
             rootToken: root_token,
             childToken: child_token,
@@ -233,39 +246,45 @@ mod tests {
             amount: U256::from(10),
         };
 
-        // let (deposit_tx, deposit_tx_receipt) =
-        // construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
+        // Construct tx and receipt
+        let (deposit_tx, deposit_tx_receipt) =
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
 
-        // // Construct withdrawal event, transaction and receipt
-        // let withdrawal_event = L1StandardBridge::ETHBridgeFinalized {
-        //     from: from_address,
-        //     to: to_address,
-        //     amount: U256::from(200),
-        //     extraData: Default::default(),
-        // };
-        // let (withdrawal_tx, withdrawal_tx_receipt) =
-        //     construct_tx_and_receipt(OP_BRIDGES[1], withdrawal_event.clone())?;
+        // Construct withdrawal event
+        let withdrawal_event = RootERC20Bridge::RootChainETHWithdraw {
+            rootToken: root_token,
+            childToken: child_token,
+            withdrawer: from_address,
+            receiver: to_address,
+            amount: U256::from(10),
+        };
+
+        // ...
+        let (withdrawal_tx, withdrawal_tx_receipt) =
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone())?;
 
         // Construct a block
-        // let block = Block {
-        //     header: Header::default(),
-        //     body: vec![deposit_tx, withdrawal_tx],
-        //     ..Default::default()
-        // }
-        // .seal_slow()
-        // .seal_with_senders()
-        // .ok_or_else(|| eyre::eyre!("failed to recover senders"))?;
+        let block = Block {
+            header: Header::default(),
+            body: vec![deposit_tx, withdrawal_tx],
+            ..Default::default()
+        }
+        .seal_slow()
+        .seal_with_senders()
+        .ok_or_else(|| eyre::eyre!("failed to add recovered signer in block"))?;
 
-        // // Construct a chain
-        // let chain = Chain::new(
-        //     vec![block.clone()],
-        //     ExecutionOutcome::new(
-        //         BundleState::default(),
-        //         vec![deposit_tx_receipt, withdrawal_tx_receipt].into(),
-        //         block.number,
-        //         vec![block.requests.clone().unwrap_or_default()],
-        //     ),
-        //     None,
-        // );
+        // Construct a chain, that holds the post execution state as a result of the above two events
+        let chain = Chain::new(
+            vec![block.clone()],
+            ExecutionOutcome::new(
+                BundleState::default(),
+                vec![deposit_tx_receipt, withdrawal_tx_receipt].into(),
+                block.number,
+                vec![block.requests.clone().unwrap_or_default()],
+            ),
+            None,
+        );
+
+        Ok(())
     }
 }

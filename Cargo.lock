@@ -3209,6 +3209,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "reth",
+ "reth-execution-types",
  "reth-exex",
  "reth-exex-test-utils",
  "reth-node-api",

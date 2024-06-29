@@ -17,6 +17,7 @@ reth-primitives = { git = "https://github.com/paradigmxyz/reth" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth" }
 reth-exex-test-utils ={ git = "https://github.com/paradigmxyz/reth" }
 reth-testing-utils = {git = "https://github.com/paradigmxyz/reth"}
+reth-execution-types = {git = "https://github.com/paradigmxyz/reth"}
 eyre = "0.6.12"
 futures = "0.3.30"
 alloy-sol-types = { version = "0.7.2", features = ["json"] }
