@@ -3,11 +3,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use alloy_sol_types::{sol, sol_data::FixedBytes};
+use alloy_sol_types::sol;
 use reth_exex::ExExContext;
 use reth_node_api::FullNodeComponents;
 use reth_node_ethereum::EthereumNode;
-use reth_primitives::{address, ruint::Uint, Address};
+use reth_primitives::{address, revm_primitives::FixedBytes, ruint::Uint, Address};
 use rusqlite::Connection;
 
 // DB
@@ -40,9 +40,49 @@ impl Database {
         self.connection.lock().expect("failed to aquire db lock")
     }
 
-    fn insert_event(&mut self) -> eyre::Result<()> {
+    fn insert_event(&mut self, event: BridgeEvent) -> eyre::Result<()> {
+        let mut connection = self.connection();
+        let tx = connection.transaction()?;
+        match event.source {
+            SourceChain::Root => {
+                tx.execute(
+                        r#"
+                            INSERT INTO deposits (block_number, tx_hash, root_token, child_token, "from", "to", amount)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            "#,
+                    (
+                        event.block_number,
+                        event.tx_hash.to_string(),
+                        event.root_token.to_string(),
+                        event.child_token.to_string(),
+                        event.from.to_string(),
+                        event.to.to_string(),
+                        event.amount.to_string(),
+                    ),
+                )?;
+            }
+            SourceChain::Child => {
+                tx.execute(
+                    r#"
+                        INSERT INTO withdrawals (block_number, tx_hash, root_token, child_token, "from", "to", amount)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        "#,
+                (
+                    event.block_number,
+                    event.tx_hash.to_string(),
+                    event.root_token.to_string(),
+                    event.child_token.to_string(),
+                    event.from.to_string(),
+                    event.to.to_string(),
+                    event.amount.to_string(),
+                ),
+            )?;
+            },
+        }
+        tx.commit()?;
         Ok(())
     }
+
     fn create_tables(&self) -> eyre::Result<()> {
         // Create deposits and withdrawals tables
         self.connection().execute_batch(
@@ -77,7 +117,7 @@ enum SourceChain {
     Root,
     Child,
 }
-struct BirdgeAction {
+struct BridgeEvent {
     source: SourceChain,
     block_number: u64,
     tx_hash: FixedBytes<32>,
