@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dev-dependencies]
+tempfile = "3.10.1"
 
 [dependencies]
 reth = { git = "https://github.com/paradigmxyz/reth" }
@@ -13,6 +15,8 @@ reth-tracing = { git = "https://github.com/paradigmxyz/reth" }
 reth-exex = { git = "https://github.com/paradigmxyz/reth" }
 reth-primitives = { git = "https://github.com/paradigmxyz/reth" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth" }
+reth-exex-test-utils ={ git = "https://github.com/paradigmxyz/reth" }
+reth-testing-utils = {git = "https://github.com/paradigmxyz/reth"}
 eyre = "0.6.12"
 futures = "0.3.30"
 alloy-sol-types = { version = "0.7.2", features = ["json"] }
@@ -20,3 +24,5 @@ once_cell = "1.19.0"
 alloy-rlp = "0.3.4"
 brotli2 = "0.3.2"
 rusqlite = "0.31.0"
+tokio = "1.38.0"
+rand = "0.8.5"
