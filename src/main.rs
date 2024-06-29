@@ -42,7 +42,7 @@ impl Database {
         let mut connection = self.connection();
         let tx = connection.transaction()?;
         match event.source {
-            SourceChain::Root => {
+            EventKind::Root => {
                 tx.execute(
                         r#"
                             INSERT INTO deposits (block_number, tx_hash, root_token, child_token, "from", "to", amount)
@@ -59,7 +59,7 @@ impl Database {
                     ),
                 )?;
             }
-            SourceChain::Child => {
+            EventKind::Child => {
                 tx.execute(
                     r#"
                         INSERT INTO withdrawals (block_number, tx_hash, root_token, child_token, "from", "to", amount)
@@ -284,6 +284,13 @@ mod tests {
             ),
             None,
         );
+
+        // Notify exex
+        handle
+            .send_notification_chain_committed(chain.clone())
+            .await?;
+        // Poll the exex to consume notification
+        exex.poll_once();
 
         Ok(())
     }
