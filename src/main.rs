@@ -1,9 +1,13 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    ops::Add,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use alloy_sol_types::sol;
+use alloy_sol_types::{sol, sol_data::FixedBytes};
 use reth_exex::ExExContext;
 use reth_node_api::FullNodeComponents;
-use reth_primitives::{address, Address};
+use reth_node_ethereum::EthereumNode;
+use reth_primitives::{address, ruint::Uint, Address};
 use rusqlite::Connection;
 
 // DB
@@ -36,44 +40,67 @@ impl Database {
         self.connection.lock().expect("failed to aquire db lock")
     }
 
+    fn insert_event(&mut self) -> eyre::Result<()> {
+        Ok(())
+    }
     fn create_tables(&self) -> eyre::Result<()> {
         // Create deposits and withdrawals tables
-        self.connection().execute(
+        self.connection().execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS deposits (
                 id               INTEGER PRIMARY KEY,
                 block_number     INTEGER NOT NULL,
                 tx_hash          TEXT NOT NULL UNIQUE,
-                contract_address TEXT NOT NULL,
+                root_token       TEXT NOT NULL,
+                child_token      TEXT NOT NULL,
                 "from"           TEXT NOT NULL,
                 "to"             TEXT NOT NULL,
                 amount           TEXT NOT NULL
             );
-            "#,
-            (),
-        )?;
-        self.connection().execute(
-            r#"
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id               INTEGER PRIMARY KEY,
                 block_number     INTEGER NOT NULL,
                 tx_hash          TEXT NOT NULL UNIQUE,
-                contract_address TEXT NOT NULL,
+                root_token       TEXT NOT NULL,
+                child_token      TEXT NOT NULL,
                 "from"           TEXT NOT NULL,
                 "to"             TEXT NOT NULL,
                 amount           TEXT NOT NULL
             );
             "#,
-            (),
         )?;
-
         Ok(())
     }
+}
+
+enum SourceChain {
+    Root,
+    Child,
+}
+struct BirdgeAction {
+    source: SourceChain,
+    block_number: u64,
+    tx_hash: FixedBytes<32>,
+    root_token: Address,
+    child_token: Address,
+    from: Address,
+    to: Address,
+    amount: Uint<256, 4>,
 }
 
 pub struct ImmutableBridgeReader<Node: FullNodeComponents> {
     ctx: ExExContext<Node>,
     db: Database,
+}
+
+impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
+    fn new(ctx: ExExContext<Node>, db: Database) -> eyre::Result<Self> {
+        Ok(Self { ctx, db })
+    }
+
+    fn run(&mut self) -> eyre::Result<()> {
+        Ok(())
+    }
 }
 
 fn main() -> eyre::Result<()> {
