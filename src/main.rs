@@ -146,6 +146,7 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
                 ExExNotification::ChainCommitted { new } => {
                     // do something
                     info!("Chain committed");
+                    println!("Chain Committed")
                 }
                 ExExNotification::ChainReorged { old, new } => {
                     // do something
@@ -167,15 +168,17 @@ fn main() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use alloy_sol_types::{abi::Token, SolEvent};
+    use eyre::ErrReport;
+    use futures::Future;
     use reth::revm::db::BundleState;
     use reth_execution_types::{Chain, ExecutionOutcome};
-    use reth_exex_test_utils::{test_exex_context, PollOnce};
+    use reth_exex_test_utils::{test_exex_context, PollOnce, TestExExHandle};
     use reth_primitives::{
         Address, Block, Header, Log, Receipt, Transaction, TransactionSigned, TxEip1559, TxKind,
         TxType, U256,
     };
     use reth_testing_utils::generators::sign_tx_with_random_key_pair;
-    use std::pin::pin;
+    use std::pin::{pin, Pin};
     use RootERC20Bridge::RootERC20BridgeEvents;
 
     use super::*;
@@ -218,18 +221,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec() -> eyre::Result<()> {
+    async fn test_exec() {
         // Create test exex
-        let (ctx, handle) = test_exex_context().await?;
+        let (ctx, handle) = test_exex_context().await.unwrap();
 
         // Create tmp file for db
-        let db_file = tempfile::NamedTempFile::new()?;
+        let db_file = tempfile::NamedTempFile::new().unwrap();
 
         // Initialize the ExEx
-        let mut exex = pin!(ImmutableBridgeReader::init(
-            ctx,
-            Connection::open(&db_file)?
-        )?);
+        let mut exex =
+            pin!(ImmutableBridgeReader::init(ctx, Connection::open(&db_file).unwrap(),).unwrap());
 
         // Generate random addresses for event
         let from_address = Address::random();
@@ -248,7 +249,7 @@ mod tests {
 
         // Construct tx and receipt
         let (deposit_tx, deposit_tx_receipt) =
-            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone()).unwrap();
 
         // Construct withdrawal event
         let withdrawal_event = RootERC20Bridge::RootChainETHWithdraw {
@@ -261,7 +262,7 @@ mod tests {
 
         // ...
         let (withdrawal_tx, withdrawal_tx_receipt) =
-            construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone())?;
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone()).unwrap();
 
         // Construct a block
         let block = Block {
@@ -271,7 +272,7 @@ mod tests {
         }
         .seal_slow()
         .seal_with_senders()
-        .ok_or_else(|| eyre::eyre!("failed to add recovered signer in block"))?;
+        .unwrap();
 
         // Construct a chain, that holds the post execution state as a result of the above two events
         let chain = Chain::new(
@@ -288,10 +289,10 @@ mod tests {
         // Notify exex
         handle
             .send_notification_chain_committed(chain.clone())
-            .await?;
-        // Poll the exex to consume notification
-        exex.poll_once();
+            .await
+            .unwrap();
 
-        Ok(())
+        // Poll the exex to consume notification
+        exex.poll_once().await.unwrap();
     }
 }
