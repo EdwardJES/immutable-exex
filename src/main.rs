@@ -48,7 +48,7 @@ impl Database {
                 tx.execute(
                         r#"
                             INSERT INTO deposits (block_number, tx_hash, root_token, child_token, "from", "to", amount)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
                             "#,
                     (
                         event.block_number,
@@ -65,7 +65,7 @@ impl Database {
                 tx.execute(
                     r#"
                         INSERT INTO withdrawals (block_number, tx_hash, root_token, child_token, "from", "to", amount)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         "#,
                 (
                     event.block_number,
@@ -147,10 +147,11 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
             match &notification {
                 ExExNotification::ChainCommitted { new } => {
                     info!("Chain committed");
-                    let events = Self::parse_chain_into_events(new);
+                    let events = parse_chain_into_events(new);
 
                     for (block, tx, event) in events {
-                        println!();
+                        let bridge_event = handle_bridge_event(block, tx, event)?;
+                        self.db.insert_event(bridge_event)?;
                     }
                     // do something
                     println!("Chain Committed")
@@ -169,44 +170,76 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
         }
         Ok(())
     }
+}
 
-    fn parse_chain_into_events(
-        chain: &Chain,
-    ) -> Vec<(
-        &SealedBlockWithSenders,
-        &TransactionSigned,
-        RootERC20BridgeEvents,
-    )> {
-        chain
-            // Get blocks and receipts from the chain Iterator<Block, Vec<Receipts>>
-            .blocks_and_receipts()
-            // Flatten vector to produce (block, receipt) pairs
-            .flat_map(|(block, receipts)| {
-                block
-                    .body
-                    // Itterator over txs
-                    .iter()
-                    // Zip up tx's and receipts
-                    .zip(receipts.iter().flatten())
-                    // Move the zipped itterator into tuple with blocck
-                    .map(move |(tx, receipt)| (block, tx, receipt))
-                // [(block1, tx1, receipt1), (block1, tx2, receipt2), ..., (blockN, txM, receiptM)]
-            })
-            // Filter to the bridge
-            .filter(|(_, tx, _)| tx.to() == Some(IMMUTABLE_BRIDGE))
-            // Flat map the logs from the receipts
-            // [(block1, tx1, log1), (block1, tx1, log2), ..., (blockX, txY, logZ)]
-            .flat_map(|(block, tx, receipt)| receipt.logs.iter().map(move |log| (block, tx, log)))
-            // Filter map to only include the logs which decode to a RootERC20Bridge events
-            .filter_map(|(block, tx, log)| {
-                RootERC20BridgeEvents::decode_raw_log(log.topics(), &log.data.data, true)
-                    // Convert result to option
-                    .ok()
-                    .map(move |event| (block, tx, event))
-            })
-            // Collect into Vec
-            .collect()
+fn handle_bridge_event(
+    block: &SealedBlockWithSenders,
+    tx: &TransactionSigned,
+    event: RootERC20BridgeEvents,
+) -> eyre::Result<BridgeEvent> {
+    match event {
+        RootERC20BridgeEvents::RootChainETHWithdraw(e) => Ok(BridgeEvent {
+            source: EventSource::Child,
+            block_number: block.number,
+            tx_hash: tx.hash,
+            root_token: e.rootToken,
+            child_token: e.childToken,
+            from: e.withdrawer,
+            to: e.receiver,
+            amount: e.amount,
+        }),
+        RootERC20BridgeEvents::NativeEthDeposit(e) => Ok(BridgeEvent {
+            source: EventSource::Root,
+            block_number: block.number,
+            tx_hash: tx.hash,
+            root_token: e.rootToken,
+            child_token: e.childToken,
+            from: e.depositor,
+            to: e.receiver,
+            amount: e.amount,
+        }),
+        _ => {
+            panic!("Unkown bridge event")
+        }
     }
+}
+
+fn parse_chain_into_events(
+    chain: &Chain,
+) -> Vec<(
+    &SealedBlockWithSenders,
+    &TransactionSigned,
+    RootERC20BridgeEvents,
+)> {
+    chain
+        // Get blocks and receipts from the chain Iterator<Block, Vec<Receipts>>
+        .blocks_and_receipts()
+        // Flatten vector to produce (block, receipt) pairs
+        .flat_map(|(block, receipts)| {
+            block
+                .body
+                // Itterator over txs
+                .iter()
+                // Zip up tx's and receipts
+                .zip(receipts.iter().flatten())
+                // Move the zipped itterator into tuple with blocck
+                .map(move |(tx, receipt)| (block, tx, receipt))
+            // [(block1, tx1, receipt1), (block1, tx2, receipt2), ..., (blockN, txM, receiptM)]
+        })
+        // Filter to the bridge
+        .filter(|(_, tx, _)| tx.to() == Some(IMMUTABLE_BRIDGE))
+        // Flat map the logs from the receipts
+        // [(block1, tx1, log1), (block1, tx1, log2), ..., (blockX, txY, logZ)]
+        .flat_map(|(block, tx, receipt)| receipt.logs.iter().map(move |log| (block, tx, log)))
+        // Filter map to only include the logs which decode to a RootERC20Bridge events
+        .filter_map(|(block, tx, log)| {
+            RootERC20BridgeEvents::decode_raw_log(log.topics(), &log.data.data, true)
+                // Convert result to option
+                .ok()
+                .map(move |event| (block, tx, event))
+        })
+        // Collect into Vec
+        .collect()
 }
 
 fn main() -> eyre::Result<()> {
@@ -215,19 +248,19 @@ fn main() -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_sol_types::{abi::Token, SolEvent};
-    use eyre::ErrReport;
-    use futures::Future;
+    use alloy_sol_types::SolEvent;
+    
+    use eyre::Ok;
     use reth::revm::db::BundleState;
     use reth_execution_types::{Chain, ExecutionOutcome};
-    use reth_exex_test_utils::{test_exex_context, PollOnce, TestExExHandle};
+    use reth_exex_test_utils::{test_exex_context, PollOnce};
     use reth_primitives::{
         Address, Block, Header, Log, Receipt, Transaction, TransactionSigned, TxEip1559, TxKind,
         TxType, U256,
     };
     use reth_testing_utils::generators::sign_tx_with_random_key_pair;
-    use std::pin::{pin, Pin};
-    use RootERC20Bridge::RootERC20BridgeEvents;
+    use std::pin::pin;
+    
 
     use super::*;
 
@@ -269,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec() {
+    async fn test_exec() -> eyre::Result<()>{
         // Create test exex
         let (ctx, handle) = test_exex_context().await.unwrap();
 
@@ -278,7 +311,7 @@ mod tests {
 
         // Initialize the ExEx
         let mut exex =
-            pin!(ImmutableBridgeReader::init(ctx, Connection::open(&db_file).unwrap(),).unwrap());
+            pin!(ImmutableBridgeReader::init(ctx, Connection::open(&db_file).unwrap()).unwrap());
 
         // Generate random addresses for event
         let from_address = Address::random();
@@ -342,5 +375,7 @@ mod tests {
 
         // Poll the exex to consume notification
         exex.poll_once().await.unwrap();
+
+        Ok(())
     }
 }
