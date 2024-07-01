@@ -158,7 +158,9 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
                 }
                 ExExNotification::ChainReorged { old, new } => {
                     info!("Chain reorged");
-
+                    // old.
+                    // This field contains the state of all accounts after the execution of all blocks in this
+                    // chain, ranging from the [`Chain::first`] block to the [`Chain::tip`] block, inclusive.
                     // do something
                 }
                 ExExNotification::ChainReverted { old } => {
@@ -256,7 +258,7 @@ mod tests {
         TxType, U256,
     };
     use reth_testing_utils::generators::sign_tx_with_random_key_pair;
-    use std::pin::pin;
+    use std::{ops::Add, pin::pin};
 
     use super::*;
 
@@ -297,20 +299,14 @@ mod tests {
         ))
     }
 
-    #[tokio::test]
-    async fn test_exec() -> eyre::Result<()> {
-        // Create test exex
-        let (ctx, handle) = test_exex_context().await?;
-
-        // Create tmp file for db
-        let db_file = tempfile::NamedTempFile::new()?;
-
-        // Initialize the ExEx
-        let mut exex = pin!(ImmutableBridgeReader::init(
-            ctx,
-            Connection::open(&db_file).unwrap()
-        )?);
-
+    fn construct_events() -> (
+        Address,
+        Address,
+        Address,
+        Address,
+        RootERC20Bridge::NativeEthDeposit,
+        RootERC20Bridge::RootChainETHWithdraw,
+    ) {
         // Generate random addresses for event
         let from_address = Address::random();
         let to_address = Address::random();
@@ -326,10 +322,6 @@ mod tests {
             amount: U256::from(10),
         };
 
-        // Construct tx and receipt
-        let (deposit_tx, deposit_tx_receipt) =
-            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
-
         // Construct withdrawal event
         let withdrawal_event = RootERC20Bridge::RootChainETHWithdraw {
             rootToken: root_token,
@@ -339,7 +331,39 @@ mod tests {
             amount: U256::from(10),
         };
 
-        // ...
+        (
+            from_address,
+            to_address,
+            root_token,
+            child_token,
+            deposit_event,
+            withdrawal_event,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_exec() -> eyre::Result<()> {
+        // Create test exex
+        let (ctx, handle) = test_exex_context().await?;
+
+        // Create tmp file for db
+        let db_file = tempfile::NamedTempFile::new()?;
+
+        // Initialize the ExEx
+        let mut exex = pin!(ImmutableBridgeReader::init(
+            ctx,
+            Connection::open(&db_file).unwrap()
+        )?);
+
+        // Generate events
+        let (from_address, to_address, root_token, child_token, deposit_event, withdrawal_event) =
+            construct_events();
+
+        // Deposit log
+        let (deposit_tx, deposit_tx_receipt) =
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
+
+        // Withdraw log
         let (withdrawal_tx, withdrawal_tx_receipt) =
             construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone())?;
 
