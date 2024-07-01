@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use alloy_sol_types::{sol, SolEventInterface};
+use eyre::eyre;
 use futures::Future;
-use reth::blockchain_tree::chain;
 use reth_exex::{ExExContext, ExExNotification};
 use reth_node_api::FullNodeComponents;
 use reth_primitives::{
@@ -198,9 +198,7 @@ fn handle_bridge_event(
             to: e.receiver,
             amount: e.amount,
         }),
-        _ => {
-            panic!("Unkown bridge event")
-        }
+        _ => Err(eyre!("Unkown bridge event")),
     }
 }
 
@@ -249,6 +247,7 @@ fn main() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use alloy_sol_types::SolEvent;
+    use eyre::eyre;
     use reth::revm::db::BundleState;
     use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_exex_test_utils::{test_exex_context, PollOnce};
@@ -301,14 +300,16 @@ mod tests {
     #[tokio::test]
     async fn test_exec() -> eyre::Result<()> {
         // Create test exex
-        let (ctx, handle) = test_exex_context().await.unwrap();
+        let (ctx, handle) = test_exex_context().await?;
 
         // Create tmp file for db
-        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db_file = tempfile::NamedTempFile::new()?;
 
         // Initialize the ExEx
-        let mut exex =
-            pin!(ImmutableBridgeReader::init(ctx, Connection::open(&db_file).unwrap()).unwrap());
+        let mut exex = pin!(ImmutableBridgeReader::init(
+            ctx,
+            Connection::open(&db_file).unwrap()
+        )?);
 
         // Generate random addresses for event
         let from_address = Address::random();
@@ -327,7 +328,7 @@ mod tests {
 
         // Construct tx and receipt
         let (deposit_tx, deposit_tx_receipt) =
-            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone()).unwrap();
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, deposit_event.clone())?;
 
         // Construct withdrawal event
         let withdrawal_event = RootERC20Bridge::RootChainETHWithdraw {
@@ -340,7 +341,7 @@ mod tests {
 
         // ...
         let (withdrawal_tx, withdrawal_tx_receipt) =
-            construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone()).unwrap();
+            construct_tx_and_receipt(IMMUTABLE_BRIDGE, withdrawal_event.clone())?;
 
         // Construct a block
         let block = Block {
@@ -350,7 +351,7 @@ mod tests {
         }
         .seal_slow()
         .seal_with_senders()
-        .unwrap();
+        .ok_or_else(|| eyre!("failed to recover senders"))?;
 
         // Construct a chain, that holds the post execution state as a result of the above two events
         let chain = Chain::new(
@@ -375,7 +376,7 @@ mod tests {
 
         let connection = Connection::open(&db_file)?;
 
-        // Assert that the deposit event was parsed correctly and inserted into the database
+        // Assert deposit
         let deposits: Vec<(u64, String, String, String, String, String, String)> = connection
               .prepare(r#"SELECT block_number, tx_hash, root_token, child_token, "from", "to", amount FROM deposits"#)?
               .query_map([], |row| {
@@ -396,15 +397,26 @@ mod tests {
             )
         );
 
-        // id               INTEGER PRIMARY KEY,
-        // block_number     INTEGER NOT NULL,
-        // tx_hash          TEXT NOT NULL UNIQUE,
-        // root_token       TEXT NOT NULL,
-        // child_token      TEXT NOT NULL,
-        // "from"           TEXT NOT NULL,
-        // "to"             TEXT NOT NULL,
-        // amount           TEXT NOT NULL
-
+        // Assert withdrawal
+        let withdrawals: Vec<(u64, String, String, String, String, String, String)> = connection
+        .prepare(r#"SELECT block_number, tx_hash, root_token, child_token, "from", "to", amount FROM withdrawals"#)?
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(withdrawals.len(), 1);
+        assert_eq!(
+            withdrawals[0],
+            (
+                block.number,
+                block.body[1].hash.to_string(),
+                root_token.to_string(),
+                child_token.to_string(),
+                from_address.to_string(),
+                to_address.to_string(),
+                withdrawal_event.amount.to_string(),
+            )
+        );
         Ok(())
     }
 }
