@@ -249,8 +249,6 @@ fn main() -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use alloy_sol_types::SolEvent;
-    
-    use eyre::Ok;
     use reth::revm::db::BundleState;
     use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_exex_test_utils::{test_exex_context, PollOnce};
@@ -260,7 +258,6 @@ mod tests {
     };
     use reth_testing_utils::generators::sign_tx_with_random_key_pair;
     use std::pin::pin;
-    
 
     use super::*;
 
@@ -302,7 +299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec() -> eyre::Result<()>{
+    async fn test_exec() -> eyre::Result<()> {
         // Create test exex
         let (ctx, handle) = test_exex_context().await.unwrap();
 
@@ -375,6 +372,38 @@ mod tests {
 
         // Poll the exex to consume notification
         exex.poll_once().await.unwrap();
+
+        let connection = Connection::open(&db_file)?;
+
+        // Assert that the deposit event was parsed correctly and inserted into the database
+        let deposits: Vec<(u64, String, String, String, String, String, String)> = connection
+              .prepare(r#"SELECT block_number, tx_hash, root_token, child_token, "from", "to", amount FROM deposits"#)?
+              .query_map([], |row| {
+                  Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+              })?
+              .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(deposits.len(), 1);
+        assert_eq!(
+            deposits[0],
+            (
+                block.number,
+                block.body[0].hash.to_string(),
+                root_token.to_string(),
+                child_token.to_string(),
+                from_address.to_string(),
+                to_address.to_string(),
+                deposit_event.amount.to_string(),
+            )
+        );
+
+        // id               INTEGER PRIMARY KEY,
+        // block_number     INTEGER NOT NULL,
+        // tx_hash          TEXT NOT NULL UNIQUE,
+        // root_token       TEXT NOT NULL,
+        // child_token      TEXT NOT NULL,
+        // "from"           TEXT NOT NULL,
+        // "to"             TEXT NOT NULL,
+        // amount           TEXT NOT NULL
 
         Ok(())
     }
