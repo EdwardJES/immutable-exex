@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use alloy_sol_types::{sol, SolEventInterface};
 use eyre::eyre;
 use futures::Future;
-use reth_exex::{ExExContext, ExExNotification};
+use reth_exex::ExExContext;
 use reth_node_api::FullNodeComponents;
 use reth_primitives::{
     address, revm_primitives::FixedBytes, ruint::Uint, Address, SealedBlockWithSenders,
@@ -83,6 +83,27 @@ impl Database {
         Ok(())
     }
 
+    fn delete_event(&mut self, event: BridgeEvent) -> rusqlite::Result<()> {
+        let mut connection = self.connection();
+        let tx = connection.transaction()?;
+        match event.source {
+            EventSource::Root => {
+                tx.execute(
+                    "DELETE FROM deposits WHERE tx_hash = ?;",
+                    (event.tx_hash.to_string(),),
+                )?;
+            }
+            EventSource::Child => {
+                tx.execute(
+                    "DELETE FROM withdrawals WHERE tx_hash = ?;",
+                    (event.tx_hash.to_string(),),
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn create_tables(&self) -> eyre::Result<()> {
         // Create deposits and withdrawals tables
         self.connection().execute_batch(
@@ -144,19 +165,27 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
 
     async fn run(mut self) -> eyre::Result<()> {
         while let Some(notification) = self.ctx.notifications.recv().await {
-            if let Some(new) = notification.committed_chain() {
+            if let Some(comitted_chain) = notification.committed_chain() {
                 info!("Chain committed");
-                let events = parse_chain_into_events(&new);
-
+                let events = parse_chain_into_events(&comitted_chain);
                 for (block, tx, event) in events {
                     let bridge_event = to_bridge_event(block, tx, event)?;
                     self.db.insert_event(bridge_event)?;
                 }
             }
-            
-            if let Some(old) = notification.reverted_chain() {
-                
+
+            if let Some(reverted_chain) = notification.reverted_chain() {
+                info!("Chain reverted");
+
+                let events = parse_chain_into_events(&reverted_chain);
+                for (block, tx, event) in events {
+                    let bridge_event = to_bridge_event(block, tx, event)?;
+                    self.db.delete_event(bridge_event)?;
+                }
             }
+
+            // Reorg case is handled by above. The reorged chain will be a reverted notification
+            // and new chain will be a committed notification.
         }
         Ok(())
     }
@@ -330,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec_committed() -> eyre::Result<()> {
+    async fn test_exec() -> eyre::Result<()> {
         // Create test exex
         let (ctx, handle) = test_exex_context().await?;
 
@@ -429,6 +458,30 @@ mod tests {
                 withdrawal_event.amount.to_string(),
             )
         );
+
+        // Trigger chain revert
+        handle.send_notification_chain_reverted(chain).await?;
+
+        // Poll
+        exex.poll_once().await?;
+
+        // Assert that the previous events are deleted
+        let withdrawals = connection
+        .prepare(r#"SELECT block_number, tx_hash, root_token, child_token, "from", "to", amount FROM withdrawals"#)?
+        .query_map([], |_| {
+            Ok(())
+        })?
+        .count();
+        assert_eq!(withdrawals, 0);
+
+        let deposits = connection
+        .prepare(r#"SELECT block_number, tx_hash, root_token, child_token, "from", "to", amount FROM withdrawals"#)?
+        .query_map([], |_| {
+            Ok(())
+        })?
+        .count();
+        assert_eq!(deposits, 0);
+
         Ok(())
     }
 }
