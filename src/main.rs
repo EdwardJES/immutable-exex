@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use alloy_sol_types::{sol, SolEventInterface};
 use eyre::eyre;
 use futures::Future;
-use reth_exex::ExExContext;
+use reth_exex::{ExExContext, ExExEvent};
 use reth_node_api::FullNodeComponents;
+use reth_node_ethereum::EthereumNode;
 use reth_primitives::{
     address, revm_primitives::FixedBytes, ruint::Uint, Address, SealedBlockWithSenders,
     TransactionSigned,
@@ -155,7 +156,7 @@ pub struct ImmutableBridgeReader<Node: FullNodeComponents> {
 }
 
 impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
-    fn init(
+    async fn init(
         ctx: ExExContext<Node>,
         connection: Connection,
     ) -> eyre::Result<impl Future<Output = eyre::Result<()>>> {
@@ -171,7 +172,13 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
                 for (block, tx, event) in events {
                     let bridge_event = to_bridge_event(block, tx, event)?;
                     self.db.insert_event(bridge_event)?;
+                    info!("Inserted committed events to db");
                 }
+
+                // Signal to exex to not notify on any comitted blocks below this height
+                self.ctx
+                    .events
+                    .send(ExExEvent::FinishedHeight(comitted_chain.tip().number))?;
             }
 
             if let Some(reverted_chain) = notification.reverted_chain() {
@@ -181,6 +188,8 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
                 for (block, tx, event) in events {
                     let bridge_event = to_bridge_event(block, tx, event)?;
                     self.db.delete_event(bridge_event)?;
+
+                    info!("Deleted reverted events from db");
                 }
             }
 
@@ -260,7 +269,18 @@ fn parse_chain_into_events(
 }
 
 fn main() -> eyre::Result<()> {
-    Ok(())
+    reth::cli::Cli::parse_args().run(|builder, _| async move {
+        let handle = builder
+            .node(EthereumNode::default())
+            .install_exex("ImmutableBridgeReader", |ctx| async move {
+                let connection = Connection::open(DB_PATH)?;
+                ImmutableBridgeReader::init(ctx, connection).await
+            })
+            .launch()
+            .await?;
+
+        handle.wait_for_node_exit().await
+    })
 }
 
 #[cfg(test)]
@@ -370,7 +390,7 @@ mod tests {
         let mut exex = pin!(ImmutableBridgeReader::init(
             ctx,
             Connection::open(&db_file).unwrap()
-        )?);
+        ).await?);
 
         // Construct events
         let (from_address, to_address, root_token, child_token, deposit_event, withdrawal_event) =
