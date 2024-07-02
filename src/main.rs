@@ -144,37 +144,25 @@ impl<Node: FullNodeComponents> ImmutableBridgeReader<Node> {
 
     async fn run(mut self) -> eyre::Result<()> {
         while let Some(notification) = self.ctx.notifications.recv().await {
-            match &notification {
-                ExExNotification::ChainCommitted { new } => {
-                    info!("Chain committed");
-                    let events = parse_chain_into_events(new);
+            if let Some(new) = notification.committed_chain() {
+                info!("Chain committed");
+                let events = parse_chain_into_events(&new);
 
-                    for (block, tx, event) in events {
-                        let bridge_event = handle_bridge_event(block, tx, event)?;
-                        self.db.insert_event(bridge_event)?;
-                    }
-                    // do something
-                    println!("Chain Committed")
+                for (block, tx, event) in events {
+                    let bridge_event = to_bridge_event(block, tx, event)?;
+                    self.db.insert_event(bridge_event)?;
                 }
-                ExExNotification::ChainReorged { old, new } => {
-                    info!("Chain reorged");
-                    // old.
-                    // This field contains the state of all accounts after the execution of all blocks in this
-                    // chain, ranging from the [`Chain::first`] block to the [`Chain::tip`] block, inclusive.
-                    // do something
-                }
-                ExExNotification::ChainReverted { old } => {
-                    info!("Chain reverted");
-                    // do something
-                    todo!()
-                }
-            };
+            }
+            
+            if let Some(old) = notification.reverted_chain() {
+                
+            }
         }
         Ok(())
     }
 }
 
-fn handle_bridge_event(
+fn to_bridge_event(
     block: &SealedBlockWithSenders,
     tx: &TransactionSigned,
     event: RootERC20BridgeEvents,
@@ -258,7 +246,7 @@ mod tests {
         TxType, U256,
     };
     use reth_testing_utils::generators::sign_tx_with_random_key_pair;
-    use std::{ops::Add, pin::pin};
+    use std::pin::pin;
 
     use super::*;
 
@@ -342,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec() -> eyre::Result<()> {
+    async fn test_exec_committed() -> eyre::Result<()> {
         // Create test exex
         let (ctx, handle) = test_exex_context().await?;
 
@@ -355,7 +343,7 @@ mod tests {
             Connection::open(&db_file).unwrap()
         )?);
 
-        // Generate events
+        // Construct events
         let (from_address, to_address, root_token, child_token, deposit_event, withdrawal_event) =
             construct_events();
 
